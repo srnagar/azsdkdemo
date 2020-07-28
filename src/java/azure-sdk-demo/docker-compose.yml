@@ -1,0 +1,6 @@
+version: '3.4'
+
+services:
+  azure-sdk-demo:
+    image: azure-sdk-demo
+    build: .
