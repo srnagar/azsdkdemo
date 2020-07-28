@@ -35,6 +35,24 @@ resource "azurerm_key_vault" "key_vault" {
   resource_group_name = azurerm_resource_group.rg.name
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = "standard"
+
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    secret_permissions = [
+      "get", "set", "list", "delete"
+    ]
+  }
+
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = azurerm_kubernetes_cluster.aks.kubelet_identity.0.object_id
+
+    secret_permissions = [
+      "get", "set", "list", "delete"
+    ]
+  }
 }
 
 resource "azurerm_key_vault_secret" "key_vault_secret" {
@@ -88,77 +106,23 @@ resource "azurerm_cosmosdb_sql_container" "cosmos_sqldb_container" {
   }
 }
 
-resource "azurerm_app_service_plan" "plan" {
-  name                = "${var.basename}plan"
-  location            = var.location
+
+resource "azurerm_kubernetes_cluster" "aks" {
+  name                = "${var.basename}aks"
+  location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  sku {
-    tier = "Basic"
-    size = "B1"
+  dns_prefix          = "${var.basename}aks"
+  kubernetes_version  = "1.17.7"
+  node_resource_group = "${var.basename}aksnodes"
+
+  default_node_pool {
+    name       = "default"
+    node_count = 1
+    vm_size    = "Standard_A2_v2"
   }
-}
-
-resource "azurerm_app_service" "app" {
-  name                = "${var.basename}app"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  app_service_plan_id = azurerm_app_service_plan.plan.id
-
 
   identity {
     type = "SystemAssigned"
-  }
-
-  app_settings = {
-    "API_ENDPOINT" = "http://${var.basename}app.azurewebsites.net:2080"
-  }
-
-  logs {
-    http_logs {
-      file_system {
-        retention_in_days = 1
-        retention_in_mb   = 25
-      }
-    }
-  }
-}
-
-resource "azurerm_app_service" "api" {
-  name                = "${var.basename}api"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  app_service_plan_id = azurerm_app_service_plan.plan.id
-
-
-  identity {
-    type = "SystemAssigned"
-  }
-
-  app_settings = {
-    "AZURE_STORAGE_BLOB_ENDPOINT"       = azurerm_storage_account.storage.primary_blob_endpoint,
-    "AZURE_STORAGE_BLOB_CONTAINER_NAME" = "blobs",
-    "AZURE_STORAGE_QUEUE_ENDPOINT"      = azurerm_storage_account.storage.primary_queue_endpoint,
-    "AZURE_STORAGE_QUEUE_NAME"          = "messages",
-    "AZURE_STORAGE_QUEUE_MSG_COUNT"     = "10",
-    "AZURE_TEXT_ANALYTICS_ENDPOINT"     = azurerm_cognitive_account.text_analytics.endpoint,
-    "AZURE_FORM_RECOGNIZER_ENDPOINT"    = azurerm_cognitive_account.text_analytics.endpoint,
-    "AZURE_COSMOS_ENDPOINT"             = azurerm_cosmosdb_account.cosmos_account.endpoint,
-    "AZURE_COSMOS_KEY_NAME"             = "cosmoskey",
-    "AZURE_COSMOS_DB"                   = "azimageai",
-    "AZURE_COSMOS_CONTAINER"            = "images",
-    "APPINSIGHTS_INSTRUMENTATIONKEY"    = azurerm_application_insights.logging.instrumentation_key,
-    "MEME_ENDPOINT"                     = "https://meme-api.herokuapp.com/gimme/wholesomememes",
-    "AZURE_KEYVAULT_ENDPOINT"           = azurerm_key_vault.key_vault.vault_uri,
-    "AZURE_STORAGE_QUEUE_RECEIVE_SLEEP" = "1"
-  }
-
-  logs {
-    http_logs {
-      file_system {
-        retention_in_days = 1
-        retention_in_mb   = 25
-      }
-    }
   }
 }
 
@@ -173,7 +137,6 @@ module "script" {
   source = "./modules/script"
   script = "./tweaks.sh"
   environment = {
-    APP_NAME             = azurerm_app_service.app.name,
     TEXT_ANALYTICS_NAME  = azurerm_cognitive_account.text_analytics.name,
     FORM_RECOGNIZER_NAME = azurerm_cognitive_account.form_recognizer.name,
     RESOURCE_GROUP_NAME  = azurerm_resource_group.rg.name
@@ -181,122 +144,57 @@ module "script" {
 }
 
 # BLOB STORAGE ROLES
-resource "azurerm_role_assignment" "api_mi_blob_storage" {
-  scope                            = azurerm_storage_account.storage.id
-  role_definition_name             = "Storage Blob Data Contributor"
-  principal_id                     = azurerm_app_service.api.identity[0].principal_id
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "user_cli_blob_storage" {
+resource "azurerm_role_assignment" "cli_blob_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-resource "azurerm_role_assignment" "sp_blob_storage" {
+resource "azurerm_role_assignment" "mi_blob_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azuread_service_principal.sp.object_id
+  principal_id         = azurerm_kubernetes_cluster.aks.kubelet_identity.0.object_id
 }
 
 # QUEUE STORAGE ROLES
-resource "azurerm_role_assignment" "api_mi_queue_storage" {
-  scope                            = azurerm_storage_account.storage.id
-  role_definition_name             = "Storage Queue Data Contributor"
-  principal_id                     = azurerm_app_service.api.identity[0].principal_id
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "user_cli_queue_storage" {
+resource "azurerm_role_assignment" "cli_queue_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Queue Data Contributor"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-resource "azurerm_role_assignment" "sp_queue_storage" {
+resource "azurerm_role_assignment" "mi_queue_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Queue Data Contributor"
-  principal_id         = azuread_service_principal.sp.object_id
+  principal_id         = azurerm_kubernetes_cluster.aks.kubelet_identity.0.object_id
 }
 
 # QUEUE MSG STORAGE ROLES
 
-resource "azurerm_role_assignment" "api_mi_queue_msg_storage" {
-  scope                            = azurerm_storage_account.storage.id
-  role_definition_name             = "Storage Queue Data Message Processor"
-  principal_id                     = azurerm_app_service.api.identity[0].principal_id
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "user_cli_queue_msg_storage" {
+resource "azurerm_role_assignment" "cli_queue_msg_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Queue Data Message Processor"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-resource "azurerm_role_assignment" "sp_queue_msg_storage" {
+resource "azurerm_role_assignment" "mi_queue_msg_storage" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Queue Data Message Processor"
-  principal_id         = azuread_service_principal.sp.object_id
+  principal_id         = azurerm_kubernetes_cluster.aks.kubelet_identity.0.object_id
 }
 
 # COG SERV ROLES
 
-resource "azurerm_role_assignment" "api_mi_cogserv" {
-  scope                            = data.azurerm_subscription.sub.id
-  role_definition_name             = "Cognitive Services User"
-  principal_id                     = azurerm_app_service.api.identity[0].principal_id
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "user_cli_cogserv" {
+resource "azurerm_role_assignment" "cli_cogserv" {
   scope                = data.azurerm_subscription.sub.id
   role_definition_name = "Cognitive Services User"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-resource "azurerm_role_assignment" "sp_cogserv" {
-  scope                            = data.azurerm_subscription.sub.id
-  role_definition_name             = "Cognitive Services User"
-  principal_id                     = azuread_service_principal.sp.object_id
-  skip_service_principal_aad_check = true
-
-}
-
-# KEY VAULT ACCESS POLICIES
-
-resource "azurerm_key_vault_access_policy" "user_cli_keyvault" {
-  key_vault_id = azurerm_key_vault.key_vault.id
-
-  tenant_id = data.azurerm_client_config.current.tenant_id
-  object_id = data.azurerm_client_config.current.object_id
-
-  secret_permissions = [
-    "get", "set", "list", "delete"
-  ]
-}
-
-resource "azurerm_key_vault_access_policy" "api_mi_keyvault" {
-  key_vault_id = azurerm_key_vault.key_vault.id
-
-  tenant_id = data.azurerm_client_config.current.tenant_id
-  object_id = azurerm_app_service.api.identity[0].principal_id
-
-  secret_permissions = [
-    "get", "set", "list", "delete"
-  ]
-}
-
-resource "azurerm_key_vault_access_policy" "sp_keyvault" {
-  key_vault_id = azurerm_key_vault.key_vault.id
-
-  tenant_id = data.azurerm_client_config.current.tenant_id
-  object_id = azuread_service_principal.sp.object_id
-
-  secret_permissions = [
-    "get", "set", "list", "delete"
-  ]
+resource "azurerm_role_assignment" "mi_cogserv" {
+  scope                = data.azurerm_subscription.sub.id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = azurerm_kubernetes_cluster.aks.kubelet_identity.0.object_id
 }
 
 output "AZURE_STORAGE_BLOB_ENDPOINT" {
@@ -321,4 +219,12 @@ output "AZURE_KEYVAULT_ENDPOINT" {
 
 output "AZURE_COSMOS_ENDPOINT" {
   value = azurerm_cosmosdb_account.cosmos_account.endpoint
+}
+
+output "AKS_IP_ADDRESS" {
+  value = "az network public-ip list -g ${azurerm_kubernetes_cluster.aks.node_resource_group} --query '[0].ipAddress' --output tsv"
+}
+
+output "AKS_CREDENTIALS" {
+  value = "az aks get-credentials --resource-group ${azurerm_resource_group.rg.name} --name ${azurerm_kubernetes_cluster.aks.name}"
 }
